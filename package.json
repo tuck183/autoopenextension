@@ -1,0 +1,37 @@
+{
+  "name": "open-changed-files",
+  "displayName": "Open Changed Files",
+  "description": "Automatically open files modified or created by agentic AI (Cursor, Copilot, etc.), while ignoring user changes, Git operations, and vendor files",
+  "version": "1.0.4",
+  "publisher": "tochi-okorie",
+  "engines": {
+    "vscode": "^1.80.0"
+  },
+  "activationEvents": [
+    "*"
+  ],
+  "main": "./extension.js",
+  "contributes": {
+    "configuration": {
+      "type": "object",
+      "title": "Open Changed Files Settings",
+      "properties": {
+        "openChangedFiles.autoOpen": {
+          "type": "boolean",
+          "default": true,
+          "description": "Automatically open files when they are changed on disk."
+        }
+      }
+    }
+  },
+  "categories": [
+    "Other"
+  ],
+  "files": [
+    "extension.js",
+    "README.md"
+  ],
+  "devDependencies": {
+    "@vscode/vsce": "^3.7.0"
+  }
+}
