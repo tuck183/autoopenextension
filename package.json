@@ -2,7 +2,7 @@
   "name": "open-changed-files",
   "displayName": "Open Changed Files",
   "description": "Automatically open files modified or created by agentic AI (Cursor, Copilot, etc.), while ignoring user changes, Git operations, and vendor files",
-  "version": "1.0.4",
+  "version": "1.0.6",
   "publisher": "tochi-okorie",
   "engines": {
     "vscode": "^1.80.0"

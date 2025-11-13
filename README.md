@@ -7,7 +7,7 @@ This is a VS Code extension that automatically opens files modified or created b
 ✅ **Auto-opens AI-generated files** - Automatically opens files when Cursor or other AI tools edit or create them  
 ✅ **Smart filtering** - Ignores files you're already editing (your changes)  
 ✅ **Git-aware** - Detects and ignores batch operations from Git (checkout, merge, rebase)  
-✅ **Noise filtering** - Automatically ignores build artifacts, vendor files, and system directories
+✅ **Noise filtering** - Automatically ignores build artifacts, vendor files, Laravel cache files, and system directories
 
 ## How It Works
 
@@ -15,7 +15,7 @@ The extension monitors file system changes in your workspace and:
 
 1. **Detects file changes** - Watches for files being created or modified
 2. **Checks if you're editing** - If you have the file open, it assumes you're making the change (ignores it)
-3. **Detects batch operations** - If multiple files change within 500ms, it's likely a Git operation (ignores it)
+3. **Detects batch operations** - If multiple files change within 2 seconds, it's likely a Git or Composer operation (ignores it)
 4. **Opens AI-generated files** - If a file changes/creates and you don't have it open, it opens it for you
 
 ## Ignored Directories
@@ -27,6 +27,7 @@ The extension automatically ignores changes in these directories:
 - `build/`, `dist/`, `out/` - Build outputs
 - `.next/`, `.nuxt/`, `.cache/` - Framework caches
 - `coverage/`, `.nyc_output/` - Test coverage
+- `storage/`, `bootstrap/` - Laravel cache directories (including `storage/framework/views`)
 
 ## Supported File Types
 

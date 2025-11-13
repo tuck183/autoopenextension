@@ -14,7 +14,8 @@ function activate(context) {
   const IGNORED_DIRS = new Set([
     'node_modules', 'vendor', '.git', '.svn', '.hg',
     '.cursor', '.vscode', 'build', 'dist', 'out',
-    '.next', '.nuxt', '.cache', 'coverage', '.nyc_output'
+    '.next', '.nuxt', '.cache', 'coverage', '.nyc_output',
+    'storage', 'bootstrap' // Laravel directories (storage contains cached views, bootstrap contains cache)
   ]);
 
   const ALLOWED_EXTS = new Set([
@@ -31,17 +32,32 @@ function activate(context) {
   const recentChecks = new Map();
   const CHECK_CACHE_TTL = 1000; // 1 second
 
-  // Track recent file changes to detect batch operations (like Git)
+  // Track recent file changes to detect batch operations (like Git, composer, etc.)
   const recentFileChanges = new Map();
-  const BATCH_DETECTION_WINDOW = 500; // 500ms window to detect batch changes
+  const BATCH_DETECTION_WINDOW = 2000; // 2 second window to detect batch changes (increased for composer updates)
 
   function shouldIgnorePath(fsPath) {
+    const normalizedPath = fsPath.toLowerCase().replace(/\\/g, '/'); // Normalize to forward slashes
     const pathSegments = fsPath.split(path.sep);
+    
+    // Check each segment in the path
     for (const segment of pathSegments) {
       if (IGNORED_DIRS.has(segment.toLowerCase())) {
         return true;
       }
     }
+    
+    // Additional checks for Laravel-specific paths
+    // Ignore storage/framework/* (cached views, sessions, etc.)
+    if (normalizedPath.includes('/storage/framework/')) {
+      return true;
+    }
+    
+    // Ignore bootstrap/cache/* (Laravel bootstrap cache)
+    if (normalizedPath.includes('/bootstrap/cache/')) {
+      return true;
+    }
+    
     return false;
   }
 
@@ -75,7 +91,7 @@ function activate(context) {
   }
 
   /**
-   * Check if this is likely a batch operation (like Git checkout/merge)
+   * Check if this is likely a batch operation (like Git checkout/merge, composer update)
    * by detecting if multiple files changed within a short time window
    */
   function isLikelyBatchOperation() {
@@ -83,7 +99,8 @@ function activate(context) {
     const recentChanges = Array.from(recentFileChanges.values())
       .filter(timestamp => (now - timestamp) < BATCH_DETECTION_WINDOW);
 
-    // If 3+ files changed within 500ms, it's likely a batch operation (Git)
+    // If 3+ files changed within the detection window, it's likely a batch operation
+    // (Git, composer update, npm install, etc.)
     return recentChanges.length >= 3;
   }
 
