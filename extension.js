@@ -34,30 +34,38 @@ function activate(context) {
 
   // Track recent file changes to detect batch operations (like Git, composer, etc.)
   const recentFileChanges = new Map();
-  const BATCH_DETECTION_WINDOW = 2000; // 2 second window to detect batch changes (increased for composer updates)
+  const BATCH_DETECTION_WINDOW = 5000; // 5 second window to detect batch changes (Git operations can take time)
+  const GIT_BATCH_THRESHOLD = 4; // If 3+ files change, likely a batch operation (Git, composer, etc.)
+  const GIT_RAPID_THRESHOLD = 3; // If 2 files change within 1 second, likely Git (very fast)
+  const RAPID_CHANGE_WINDOW = 1000; // 1 second window for rapid changes (Git operations are usually very fast)
+
+  // Track if we're currently in a Git operation period
+  let gitOperationActive = false;
+  let gitOperationEndTime = 0;
+  const GIT_OPERATION_COOLDOWN = 10000; // 10 seconds after batch detection, assume Git operation is complete
 
   function shouldIgnorePath(fsPath) {
     const normalizedPath = fsPath.toLowerCase().replace(/\\/g, '/'); // Normalize to forward slashes
     const pathSegments = fsPath.split(path.sep);
-    
+
     // Check each segment in the path
     for (const segment of pathSegments) {
       if (IGNORED_DIRS.has(segment.toLowerCase())) {
         return true;
       }
     }
-    
+
     // Additional checks for Laravel-specific paths
     // Ignore storage/framework/* (cached views, sessions, etc.)
     if (normalizedPath.includes('/storage/framework/')) {
       return true;
     }
-    
+
     // Ignore bootstrap/cache/* (Laravel bootstrap cache)
     if (normalizedPath.includes('/bootstrap/cache/')) {
       return true;
     }
-    
+
     return false;
   }
 
@@ -91,17 +99,98 @@ function activate(context) {
   }
 
   /**
+   * Check if a file is likely tracked by Git (heuristic check)
+   * Returns true if file is within a Git repository
+   */
+  async function isFileInGitRepository(fsPath) {
+    try {
+      const gitExtension = vscode.extensions.getExtension('vscode.git');
+      if (!gitExtension || !gitExtension.isActive) {
+        return false;
+      }
+
+      const api = gitExtension.exports.getAPI(1);
+      if (!api) {
+        return false;
+      }
+
+      const workspaceFolder = vscode.workspace.getWorkspaceFolder(vscode.Uri.file(fsPath));
+      if (!workspaceFolder) {
+        return false;
+      }
+
+      const repository = api.getRepository(workspaceFolder.uri);
+      if (!repository) {
+        return false;
+      }
+
+      // Check if file is within the Git repository
+      const repoPath = repository.rootUri.fsPath;
+      if (fsPath.startsWith(repoPath)) {
+        // File is within Git repository - likely tracked (or would be affected by Git operations)
+        return true;
+      }
+    } catch (err) {
+      // If Git API fails, don't block - just return false
+      console.log('Git API check failed:', err.message);
+    }
+    return false;
+  }
+
+  /**
    * Check if this is likely a batch operation (like Git checkout/merge, composer update)
    * by detecting if multiple files changed within a short time window
+   * 
+   * Key distinction: Git operations are VERY rapid (all files change within 1-2 seconds)
+   * AI agents usually have some delay between file changes
    */
   function isLikelyBatchOperation() {
     const now = Date.now();
     const recentChanges = Array.from(recentFileChanges.values())
       .filter(timestamp => (now - timestamp) < BATCH_DETECTION_WINDOW);
 
-    // If 3+ files changed within the detection window, it's likely a batch operation
-    // (Git, composer update, npm install, etc.)
-    return recentChanges.length >= 3;
+    // Check for very rapid changes (within 1 second) - this is almost certainly Git
+    const rapidChanges = recentChanges.filter(timestamp => (now - timestamp) < RAPID_CHANGE_WINDOW);
+    if (rapidChanges.length >= GIT_RAPID_THRESHOLD) {
+      // If 2+ files changed within 1 second, it's very likely Git
+      return true;
+    }
+
+    // For slower changes, check if they're all happening very close together
+    // Git operations: files change within 1-2 seconds of each other
+    // AI agents: files change with more spacing (2-5 seconds apart)
+    if (recentChanges.length >= GIT_BATCH_THRESHOLD) {
+      // Sort timestamps to check spacing
+      const sortedChanges = [...recentChanges].sort((a, b) => a - b);
+
+      // Check if all changes happened within a 2-second window
+      // (Git operations are very tight, AI agents have more spread)
+      const timeSpan = sortedChanges[sortedChanges.length - 1] - sortedChanges[0];
+      if (timeSpan < 2000) {
+        // All files changed within 2 seconds - very likely Git
+        return true;
+      }
+
+      // If changes are spread over 3+ seconds, it might be an AI agent
+      // Allow these through (return false)
+    }
+
+    return false;
+  }
+
+  /**
+   * Check if we're currently in a Git operation period
+   */
+  function isInGitOperationPeriod() {
+    const now = Date.now();
+    if (gitOperationActive && now < gitOperationEndTime) {
+      return true;
+    }
+    // Reset if cooldown period has passed
+    if (now >= gitOperationEndTime) {
+      gitOperationActive = false;
+    }
+    return false;
   }
 
   /**
@@ -153,15 +242,40 @@ function activate(context) {
       return;
     }
 
+    // Check if we're in an active Git operation period
+    if (isInGitOperationPeriod()) {
+      console.log('Skipping - currently in Git operation period:', uri.fsPath);
+      return;
+    }
+
     // Wait a bit to see if this is part of a batch operation (like Git)
-    await new Promise(resolve => setTimeout(resolve, BATCH_DETECTION_WINDOW));
+    // Use a shorter wait for initial check, then check again
+    await new Promise(resolve => setTimeout(resolve, Math.min(BATCH_DETECTION_WINDOW, 3000)));
 
     // If multiple files changed in quick succession, it's likely Git - ignore
     const isBatch = isLikelyBatchOperation();
     console.log('Is batch operation?', isBatch, 'recent changes:', recentFileChanges.size);
+
     if (isBatch) {
-      console.log('Skipping - detected as batch operation (likely Git)');
+      // Mark that we're in a Git operation period
+      gitOperationActive = true;
+      gitOperationEndTime = Date.now() + GIT_OPERATION_COOLDOWN;
+      console.log('Skipping - detected as batch operation (likely Git), setting Git operation period');
       return;
+    }
+
+    // Additional check: if file is in Git repository and we're seeing rapid changes, it's likely Git
+    const isInRepo = await isFileInGitRepository(uri.fsPath);
+    if (isInRepo) {
+      // Check again after a short delay to see if more files changed
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      const isStillBatch = isLikelyBatchOperation();
+      if (isStillBatch) {
+        gitOperationActive = true;
+        gitOperationEndTime = Date.now() + GIT_OPERATION_COOLDOWN;
+        console.log('Skipping - file in Git repo during batch operation:', uri.fsPath);
+        return;
+      }
     }
 
     // File was changed/created and user doesn't have it open
