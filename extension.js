@@ -34,10 +34,10 @@ function activate(context) {
 
   // Track recent file changes to detect batch operations (like Git, composer, etc.)
   const recentFileChanges = new Map();
-  const BATCH_DETECTION_WINDOW = 5000; // 5 second window to detect batch changes (Git operations can take time)
-  const GIT_BATCH_THRESHOLD = 4; // If 3+ files change, likely a batch operation (Git, composer, etc.)
-  const GIT_RAPID_THRESHOLD = 3; // If 2 files change within 1 second, likely Git (very fast)
-  const RAPID_CHANGE_WINDOW = 1000; // 1 second window for rapid changes (Git operations are usually very fast)
+  const BATCH_DETECTION_WINDOW = 3000; // 3 second window to detect batch changes
+  const GIT_BATCH_THRESHOLD = 10; // If 10+ files change, likely a batch operation (Git, composer, etc.)
+  const GIT_RAPID_THRESHOLD = 5; // If 5+ files change within 500ms, likely Git (very fast)
+  const RAPID_CHANGE_WINDOW = 500; // 500ms window for rapid changes (Git operations are extremely fast)
 
   // Track if we're currently in a Git operation period
   let gitOperationActive = false;
@@ -141,38 +141,42 @@ function activate(context) {
    * Check if this is likely a batch operation (like Git checkout/merge, composer update)
    * by detecting if multiple files changed within a short time window
    * 
-   * Key distinction: Git operations are VERY rapid (all files change within 1-2 seconds)
-   * AI agents usually have some delay between file changes
+   * Key distinction: Git operations are EXTREMELY rapid (all files change within 500ms)
+   * AI agents may be fast but rarely change 5+ files within 500ms
    */
   function isLikelyBatchOperation() {
     const now = Date.now();
     const recentChanges = Array.from(recentFileChanges.values())
       .filter(timestamp => (now - timestamp) < BATCH_DETECTION_WINDOW);
 
-    // Check for very rapid changes (within 1 second) - this is almost certainly Git
+    // Check for extremely rapid changes (within 500ms) - this is almost certainly Git
+    // AI agents rarely modify 5+ files within 500ms
     const rapidChanges = recentChanges.filter(timestamp => (now - timestamp) < RAPID_CHANGE_WINDOW);
     if (rapidChanges.length >= GIT_RAPID_THRESHOLD) {
-      // If 2+ files changed within 1 second, it's very likely Git
+      // If 5+ files changed within 500ms, it's very likely Git
+      console.log('Detected rapid batch:', rapidChanges.length, 'files within', RAPID_CHANGE_WINDOW, 'ms');
       return true;
     }
 
-    // For slower changes, check if they're all happening very close together
-    // Git operations: files change within 1-2 seconds of each other
-    // AI agents: files change with more spacing (2-5 seconds apart)
+    // For slower changes, only block if MANY files change (10+)
+    // This catches large Git operations while allowing AI agents to modify multiple files
     if (recentChanges.length >= GIT_BATCH_THRESHOLD) {
       // Sort timestamps to check spacing
       const sortedChanges = [...recentChanges].sort((a, b) => a - b);
 
-      // Check if all changes happened within a 2-second window
-      // (Git operations are very tight, AI agents have more spread)
+      // Check if all changes happened within a very tight window (1 second)
+      // Git operations: files change within 500ms-1 second of each other
+      // AI agents: even if fast, usually have 1-2 second gaps
       const timeSpan = sortedChanges[sortedChanges.length - 1] - sortedChanges[0];
-      if (timeSpan < 2000) {
-        // All files changed within 2 seconds - very likely Git
+      if (timeSpan < 1000) {
+        // 10+ files changed within 1 second - very likely Git
+        console.log('Detected large batch:', recentChanges.length, 'files within', timeSpan, 'ms');
         return true;
       }
 
-      // If changes are spread over 3+ seconds, it might be an AI agent
+      // If changes are spread over 1+ seconds, it might be an AI agent
       // Allow these through (return false)
+      console.log('Allowing through - changes spread over', timeSpan, 'ms (likely AI agent)');
     }
 
     return false;
@@ -248,34 +252,50 @@ function activate(context) {
       return;
     }
 
-    // Wait a bit to see if this is part of a batch operation (like Git)
-    // Use a shorter wait for initial check, then check again
-    await new Promise(resolve => setTimeout(resolve, Math.min(BATCH_DETECTION_WINDOW, 3000)));
+    // Count how many files changed recently (within detection window)
+    const recentCount = Array.from(recentFileChanges.values())
+      .filter(timestamp => (now - timestamp) < BATCH_DETECTION_WINDOW).length;
 
-    // If multiple files changed in quick succession, it's likely Git - ignore
-    const isBatch = isLikelyBatchOperation();
-    console.log('Is batch operation?', isBatch, 'recent changes:', recentFileChanges.size);
+    console.log('Recent file changes count:', recentCount, 'for:', uri.fsPath);
 
-    if (isBatch) {
-      // Mark that we're in a Git operation period
-      gitOperationActive = true;
-      gitOperationEndTime = Date.now() + GIT_OPERATION_COOLDOWN;
-      console.log('Skipping - detected as batch operation (likely Git), setting Git operation period');
-      return;
-    }
-
-    // Additional check: if file is in Git repository and we're seeing rapid changes, it's likely Git
-    const isInRepo = await isFileInGitRepository(uri.fsPath);
-    if (isInRepo) {
-      // Check again after a short delay to see if more files changed
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      const isStillBatch = isLikelyBatchOperation();
-      if (isStillBatch) {
+    // Smart opening logic based on file count
+    // 1-2 files: Open immediately (no wait)
+    // 3-9 files: Very short wait (300ms) to check for rapid Git operations
+    // 10+ files: Longer wait (1s) to detect large Git operations
+    
+    if (recentCount <= 2) {
+      console.log('Single or pair file change - opening immediately');
+      // No wait needed, proceed directly to open
+    } else if (recentCount >= 3 && recentCount < 10) {
+      // 3-9 files: AI agents often modify this many files
+      // Only wait briefly to catch extremely rapid Git operations
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      // Check if it's an extremely rapid batch (5+ files within 500ms = Git)
+      const rapidChanges = Array.from(recentFileChanges.values())
+        .filter(timestamp => (now - timestamp) < RAPID_CHANGE_WINDOW);
+      
+      if (rapidChanges.length >= GIT_RAPID_THRESHOLD) {
+        // 5+ files within 500ms = definitely Git
         gitOperationActive = true;
         gitOperationEndTime = Date.now() + GIT_OPERATION_COOLDOWN;
-        console.log('Skipping - file in Git repo during batch operation:', uri.fsPath);
+        console.log('Skipping - rapid batch detected (5+ files within 500ms)');
         return;
       }
+      // Otherwise, allow through - likely AI agent
+      console.log('Allowing through - 3-9 files with normal timing (likely AI agent)');
+    } else {
+      // 10+ files: Could be Git or large AI operation
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      const isBatch = isLikelyBatchOperation();
+      if (isBatch) {
+        gitOperationActive = true;
+        gitOperationEndTime = Date.now() + GIT_OPERATION_COOLDOWN;
+        console.log('Skipping - large batch operation detected (likely Git)');
+        return;
+      }
+      // Allow through if not detected as batch
     }
 
     // File was changed/created and user doesn't have it open
