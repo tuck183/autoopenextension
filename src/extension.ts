@@ -35,7 +35,9 @@ const EXCLUDED_DIRS = [
   'build',
   'dist',
   'cache',
-  '.cache'
+  '.cache',
+  'storage',  // Laravel storage directory (includes compiled views)
+  'bootstrap' // Laravel bootstrap cache
 ];
 
 let fileWatcher: vscode.FileSystemWatcher | undefined;
@@ -47,6 +49,10 @@ let outputChannel: vscode.OutputChannel;
 const documentModificationTimes = new Map<string, number>();
 // Track files that were opened by this extension (to avoid re-opening)
 const autoOpenedFiles = new Set<string>();
+
+// Track package manager operations (composer, npm, etc.)
+let isPackageManagerRunning = false;
+let packageManagerCooldown: NodeJS.Timeout | undefined;
 
 function log(message: string) {
   if (outputChannel) {
@@ -81,9 +87,100 @@ export function activate(context: vscode.ExtensionContext) {
 
   fileWatcher = vscode.workspace.createFileSystemWatcher(pattern);
 
+  // Aggressive package manager detection
+  // Strategy: Watch for early indicators and set a LONG cooldown immediately
+
+  // 1. Watch package definition files - these are read at the START of operations
+  const packageJsonWatcher = vscode.workspace.createFileSystemWatcher('**/package.json');
+  const composerJsonWatcher = vscode.workspace.createFileSystemWatcher('**/composer.json');
+
+  // 2. Watch lock files - these change early in the process
+  const lockFileWatcher = vscode.workspace.createFileSystemWatcher('**/{composer.lock,package-lock.json,yarn.lock}');
+
+  // 3. Watch vendor/autoload.php and node_modules/.package-lock.json (created early)
+  const autoloadWatcher = vscode.workspace.createFileSystemWatcher('**/vendor/autoload.php');
+  const npmLockWatcher = vscode.workspace.createFileSystemWatcher('**/node_modules/.package-lock.json');
+
+  // 4. Watch specific indicator files that signal package manager activity
+  const composerInstalledWatcher = vscode.workspace.createFileSystemWatcher('**/vendor/composer/installed.json');
+
+  // 5. Watch build output directories (for npm run commands)
+  const buildWatcher = vscode.workspace.createFileSystemWatcher('**/{public/build,public/js,public/css,dist}/**');
+  const manifestWatcher = vscode.workspace.createFileSystemWatcher('**/{mix-manifest.json,manifest.json,.vite/manifest.json}');
+
+  let activityStartTime = 0;
+
+  const handlePackageManagerActivity = (source: string) => {
+    const now = Date.now();
+
+    if (!isPackageManagerRunning) {
+      isPackageManagerRunning = true;
+      activityStartTime = now;
+      log(`🚫 Package manager/build activity detected (${source}) - suppressing auto-open for 30 seconds`);
+    } else {
+      // Already running, extend the cooldown
+      log(`🔄 Package manager activity continuing (${source}) - extending cooldown`);
+    }
+
+    // Clear existing cooldown and set new one
+    if (packageManagerCooldown) {
+      clearTimeout(packageManagerCooldown);
+    }
+
+    // Increased to 30 seconds for more thorough coverage
+    packageManagerCooldown = setTimeout(() => {
+      isPackageManagerRunning = false;
+      const duration = ((Date.now() - activityStartTime) / 1000).toFixed(1);
+      log(`✅ Package manager cooldown expired after ${duration}s - resuming auto-open`);
+    }, 30000); // 30 second cooldown
+  };
+
+  // Package definition files - watch for changes (composer require, npm install <package>)
+  packageJsonWatcher.onDidChange(() => handlePackageManagerActivity('package.json'));
+  composerJsonWatcher.onDidChange(() => handlePackageManagerActivity('composer.json'));
+
+  // Lock files - these change at the START and END of operations
+  lockFileWatcher.onDidChange(() => handlePackageManagerActivity('lock file'));
+  lockFileWatcher.onDidCreate(() => handlePackageManagerActivity('lock file created'));
+
+  // Autoload files - created very early in composer operations
+  autoloadWatcher.onDidChange(() => handlePackageManagerActivity('autoload.php'));
+  autoloadWatcher.onDidCreate(() => handlePackageManagerActivity('autoload.php created'));
+
+  // npm lock file in node_modules
+  npmLockWatcher.onDidChange(() => handlePackageManagerActivity('node_modules lock'));
+  npmLockWatcher.onDidCreate(() => handlePackageManagerActivity('node_modules lock created'));
+
+  // Composer installed.json
+  composerInstalledWatcher.onDidChange(() => handlePackageManagerActivity('composer installed.json'));
+  composerInstalledWatcher.onDidCreate(() => handlePackageManagerActivity('composer installed.json created'));
+
+  // Build outputs
+  buildWatcher.onDidChange(() => handlePackageManagerActivity('build output'));
+  buildWatcher.onDidCreate(() => handlePackageManagerActivity('build output created'));
+  manifestWatcher.onDidChange(() => handlePackageManagerActivity('build manifest'));
+  manifestWatcher.onDidCreate(() => handlePackageManagerActivity('build manifest created'));
+
+  context.subscriptions.push(
+    packageJsonWatcher,
+    composerJsonWatcher,
+    lockFileWatcher,
+    autoloadWatcher,
+    npmLockWatcher,
+    composerInstalledWatcher,
+    buildWatcher,
+    manifestWatcher
+  );
+
   // Watch for file creation
   fileWatcher.onDidCreate(async (uri) => {
     log(`File created: ${uri.fsPath}`);
+
+    if (isPackageManagerRunning) {
+      log(`Skipping file creation (package manager is running): ${uri.fsPath}`);
+      return;
+    }
+
     if (shouldAutoOpen(uri)) {
       log(`Should auto-open created file: ${uri.fsPath}`);
       await openFile(uri);
@@ -93,16 +190,32 @@ export function activate(context: vscode.ExtensionContext) {
   });
 
   // Watch for file changes (external file system changes)
+  // Note: This can fire on browser refreshes, package managers, or remote operations
+  // We'll be more selective about which changes trigger auto-open
   fileWatcher.onDidChange(async (uri) => {
-    log(`File changed (external): ${uri.fsPath}`);
+    const relativePath = vscode.workspace.asRelativePath(uri, false);
+    log(`File changed (external): ${relativePath}`);
+
+    if (isPackageManagerRunning) {
+      log(`Skipping file change (package manager is running): ${relativePath}`);
+      return;
+    }
+
+    // Skip if it's a Laravel storage file (e.g., compiled views from browser refresh)
+    if (relativePath.includes('storage/') || relativePath.includes('storage\\')) {
+      log(`Ignoring external change in storage directory: ${relativePath}`);
+      return;
+    }
+
     if (shouldAutoOpen(uri)) {
       const filePath = uri.fsPath;
       const now = Date.now();
       const lastChecked = lastCheckedFiles.get(filePath) || 0;
 
-      // Debounce: don't check the same file more than once per second
-      if (now - lastChecked < 1000) {
-        log(`Skipping ${filePath} (debounced)`);
+      // Debounce: don't check the same file more than once per 2 seconds
+      // Increased from 1s to reduce noise from browser refreshes
+      if (now - lastChecked < 2000) {
+        log(`Skipping ${filePath} (debounced - likely browser refresh or auto-update)`);
         return;
       }
 
@@ -112,7 +225,7 @@ export function activate(context: vscode.ExtensionContext) {
       await new Promise(resolve => setTimeout(resolve, 200));
       await openFile(uri);
     } else {
-      log(`Skipping changed file (doesn't match criteria): ${uri.fsPath}`);
+      log(`Skipping changed file (doesn't match criteria): ${relativePath}`);
     }
   });
 
@@ -137,6 +250,11 @@ export function activate(context: vscode.ExtensionContext) {
   // This is the key - when Cursor agent edits files, it uses VS Code's edit API
   const changeDisposable = vscode.workspace.onDidChangeTextDocument(async (event) => {
     const document = event.document;
+
+    if (isPackageManagerRunning) {
+      return; // Silently skip during package manager operations
+    }
+
     if (document.uri.scheme === 'file' && shouldAutoOpen(document.uri)) {
       const filePath = document.uri.fsPath;
       const now = Date.now();
@@ -160,6 +278,10 @@ export function activate(context: vscode.ExtensionContext) {
 
   // Watch for when files are saved
   const saveDisposable = vscode.workspace.onDidSaveTextDocument(async (document) => {
+    if (isPackageManagerRunning) {
+      return; // Silently skip during package manager operations
+    }
+
     if (document.uri.scheme === 'file' && shouldAutoOpen(document.uri)) {
       const filePath = document.uri.fsPath;
       documentModificationTimes.set(filePath, Date.now());
@@ -197,18 +319,32 @@ export function activate(context: vscode.ExtensionContext) {
 
   log('Cursor Auto-Open extension setup complete');
 
-  // Show output channel on first activation
-  outputChannel.show(true);
+  // Don't auto-show output channel - user can open manually if needed
+  // outputChannel.show(true);
 }
 
 function shouldAutoOpen(uri: vscode.Uri): boolean {
   const filePath = uri.fsPath;
   const relativePath = vscode.workspace.asRelativePath(uri, false);
 
+  // Laravel-specific: Never open compiled Blade templates from storage/framework/views
+  if (relativePath.includes('storage/framework/views') ||
+    relativePath.includes('storage\\framework\\views')) {
+    log(`Skipping Laravel compiled view: ${relativePath}`);
+    return false;
+  }
+
+  // Laravel-specific: Never open any files in storage directory
+  if (relativePath.startsWith('storage/') || relativePath.startsWith('storage\\')) {
+    log(`Skipping Laravel storage file: ${relativePath}`);
+    return false;
+  }
+
   // Check if file is in excluded directory
   const pathParts = relativePath.split(path.sep);
   for (const part of pathParts) {
     if (EXCLUDED_DIRS.includes(part.toLowerCase())) {
+      log(`Skipping file in excluded directory (${part}): ${relativePath}`);
       return false;
     }
   }
@@ -217,6 +353,7 @@ function shouldAutoOpen(uri: vscode.Uri): boolean {
   const fileName = path.basename(filePath);
   for (const pattern of DISALLOWED_PATTERNS) {
     if (pattern.test(fileName)) {
+      log(`Skipping file matching disallowed pattern: ${relativePath}`);
       return false;
     }
   }

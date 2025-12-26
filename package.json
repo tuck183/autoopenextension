@@ -2,7 +2,7 @@
   "name": "cursor-auto-open",
   "displayName": "Cursor Auto-Open Files",
   "description": "Automatically opens files created or edited by Cursor agent",
-  "version": "0.0.8",
+  "version": "0.3.1",
   "publisher": "tochi-okorie",
   "engines": {
     "vscode": "^1.74.0"

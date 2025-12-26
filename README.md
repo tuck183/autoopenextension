@@ -17,9 +17,10 @@ A VS Code extension that automatically opens files created or edited by the Curs
 - README files: `.md`, `.mdx`, `.mdc`
 
 ### Excluded:
-- Files in `vendor/`, `node_modules/`, `.git/`, `build/`, `dist/`, `cache/`
+- Files in `vendor/`, `node_modules/`, `.git/`, `build/`, `dist/`, `cache/`, `storage/`, `bootstrap/`
 - Lock files: `yarn.lock`, `package-lock.json`
 - Other: `.env`, `.lock`, `.log`, `.sql`, `.txt`
+- **Laravel:** All files in `storage/` directory (including compiled Blade views in `storage/framework/views/`)
 
 ## Configuration
 
@@ -68,4 +69,43 @@ This will create a `cursor-auto-open-0.0.1.vsix` file that you can install in VS
 This extension watches for file system changes and opens files that match the criteria. It uses VS Code's file system watcher API to detect when files are created or modified.
 
 **Test note:** Extension is working perfectly - all file types auto-open as expected!
+
+## Laravel-Specific Behavior
+
+The extension intelligently handles Laravel projects:
+- **Never opens** compiled Blade templates from `storage/framework/views/`
+- **Never opens** any files in the `storage/` directory
+- **Only opens** actual source files from `resources/views/` when edited by the AI agent
+- **Ignores** browser refreshes and remote operations that trigger file changes in storage
+- Browser refreshes that update compiled views will not open files in the editor
+
+## Package Manager & Build Script Detection
+
+The extension automatically detects when package managers and build scripts are running:
+- **Composer** (`composer install`, `composer require`, etc.)
+- **npm** (`npm install`, `npm update`, `npm run build`, `npm run dev`, etc.)
+- **Yarn** (`yarn install`, `yarn add`, etc.)
+- **Build tools** (Vite, Laravel Mix, Webpack, etc.)
+
+When package manager or build activity is detected, the extension:
+- **Immediately** suppresses all auto-open operations for 30 seconds
+- Prevents opening of framework-generated, installed, compiled, or dependency files
+- Extends the cooldown with each new activity (prevents premature resumption)
+- Resumes normal operation after 30 seconds of inactivity
+
+**Early Detection Strategy:**
+The extension watches for early indicators that trigger BEFORE most files are created:
+- `package.json`, `composer.json` (read at start of operations)
+- `composer.lock`, `package-lock.json`, `yarn.lock` (change early in process)
+- `vendor/autoload.php` (created early in composer operations)
+- `vendor/composer/installed.json` (composer metadata)
+- `node_modules/.package-lock.json` (npm metadata)
+- Build manifests and output directories
+
+This aggressive detection ensures the suppression activates **before** files flood in.
+
+This ensures that:
+- Installing packages like Laravel Fortify doesn't flood your editor
+- Running `npm run dev` or `npm run build` doesn't open compiled assets
+- Hot module replacement (HMR) doesn't trigger file opens
 
