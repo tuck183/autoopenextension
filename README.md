@@ -1,4 +1,4 @@
-# Cursor Auto-Open Extension
+# Cursor Auto-Open Extension.
 
 A VS Code extension that automatically opens files created or edited by the Cursor agent.
 
